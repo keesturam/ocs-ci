@@ -4,83 +4,120 @@ Automates the following test
 OCS-269 - FT-OCP-Create-PV-AllocateSizeMoreThanClusterSize
 Verify a PVC creation by allocating more storage
 than what is available in Ceph
-
-https://polarion.engineering.redhat.com/polarion/#/project/
-OpenShiftContainerStorage/workitem?id=OCS-269
-
 """
 
 import logging
 import yaml
 import os
-from utility.utils import run_cmd
-import json
-from ocs import ocp
-from openshift.dynamic import DynamicClient
-from utility import utils, templating
-from kubernetes import config
-from ocsci.enums import StatusOfTest
-import time
+import pytest
+import ocs.defaults as defaults
 
-k8s_client = config.new_client_from_config()
-dyn_client = DynamicClient(k8s_client)
+from ocs import ocp
+from utility import utils, templating
+from utility.utils import run_cmd
+from ocsci.testlib import tier1, ManageTest
+
 log = logging.getLogger(__name__)
 
-PVC_YAML = os.path.join("templates/ocs-deployment",
-                        "PersistentVolumeClaim.yaml")
-POD_YAML = os.path.join("templates/ocs-deployment",
-                        "Pod.yaml")
-SC_YAML = os.path.join("templates/ocs-deployment",
-                       "StorageClass.yaml")
+PVC_YAML = os.path.join(
+    "templates", "RBD_PersistentVolumeClaim.yaml"
+)
+POD_YAML = os.path.join(
+    "templates", "RBD_NginxPod.yaml"
+)
+SC_YAML = os.path.join(
+    "templates", "RBD_StorageClass.yaml"
+)
+
+
 TEMP_PVC_YAML_FILE = '/tmp/pvc_test.yaml'
 TEMP_POD_YAML_FILE = '/tmp/pod_test.yaml'
 TEMP_SC_YAML_FILE = '/tmp/sc_test.yaml'
 
-POD = ocp.OCP(kind='Pod')
-PVC = ocp.OCP(kind='PersistentVolumeClaim')
-PV = ocp.OCP(kind='PersistentVolume')
-SC = ocp.OCP(kind='StorageClass')
-NAMESPACE = ocp.OCP(kind='Project')
+POD = ocp.OCP(
+    kind='Pod', namespace=defaults.TEST_NAMESPACE
+)
+PVC = ocp.OCP(
+    kind='PersistentVolumeClaim', namespace=defaults.TEST_NAMESPACE
+)
+PV = ocp.OCP(
+    kind='PersistentVolume', namespace=defaults.TEST_NAMESPACE
+)
+SC = ocp.OCP(
+    kind='StorageClass', namespace=defaults.TEST_NAMESPACE
+)
+NAMESPACE = ocp.OCP(
+    kind='Project', namespace=defaults.TEST_NAMESPACE
+)
+OCP = ocp.OCP(
+    kind='Pod', namespace=defaults.TEST_NAMESPACE
+)
 
 
-def ceph_storage_capacity(ceph_tool):
-    '''
+@pytest.fixture(scope='class')
+def test_fixture(request):
+    """
+    Over allocate a PVC above cluster's overall capacity
+    """
+    self = request.node.cls
+
+    def finalizer():
+        teardown(self)
+    request.addfinalizer(finalizer)
+    setup(self)
+
+
+def teardown(self):
+    """
+    Tearing down the environment
+    """
+    assert delete_storageclass(self.data['sc_name']), \
+        "Deletion of rbd storage class failed"
+    assert delete_namespace(self.data['project_name']), \
+        "Deletion of namespace failed"
+    utils.delete_file(TEMP_POD_YAML_FILE)
+    utils.delete_file(TEMP_PVC_YAML_FILE)
+    utils.delete_file(TEMP_SC_YAML_FILE)
+
+
+def setup(self):
+    assert create_namespace(**self.data)
+    assert create_storageclass(**self.data)
+
+
+def ceph_storage_capacity():
+    """
     Returns the total capacity of the ceph cluster
     in openshift-storage project
-    '''
 
-    # TODO: use an exec function to run ceph status
-    pods = run_cmd(f'oc rsh -n openshift-storage {ceph_tool} \
-    ceph status --format json')
-    pods_json = json.loads(pods)
-    avail_cap = pods_json['pgmap']['bytes_total']
-    avail_cap_gb = avail_cap / (1024 * 1024 * 1024)
-    return avail_cap_gb
+    Args:
+        ceph_tool: ceph tool pod name
 
+    Returns:
+        (int) : Total capacity of the ceph cluster
+    """
 
-def find_cephtool():
-    '''
-    Returns rook-ceph-tools pod from the list of pods in
-    openshift-storage project
-    '''
-
-    v1_pods = dyn_client.resources.get(api_version='v1', kind='Pod')
-    out = v1_pods.get(
-        namespace='openshift-storage', label_selector='app=rook-ceph-tools'
-    )
-    return out['items'][0]['metadata']['name']
+    status = ocp.exec_ceph_cmd('ceph status')
+    total_cap = status['pgmap']['bytes_total']
+    total_cap_gb = total_cap / defaults.GB
+    return int(total_cap_gb)
 
 
 def create_namespace(**kwargs):
-    '''
+    """
     Creates a project if it is not already available
-    '''
+
+    Args:
+        **kwargs:
+
+    Returns:
+        (bool): True if namespace creation is successful, False otherwise
+
+    """
     project_name = (kwargs['project_name'])
     project_get = NAMESPACE.get()
-    namespaces = []
-    for i in range(len(project_get['items'])):
-        namespaces.append(project_get['items'][i]['metadata']['name'])
-    log.info(f'checking id project {project_name} already exists')
+    namespaces = [item['metadata']['name'] for item in project_get['items']]
+    log.info(f'checking if project {project_name} already exists')
     if project_name in namespaces:
         log.info(
             f'project {project_name} exists, using the existing namespace'
@@ -91,25 +128,34 @@ def create_namespace(**kwargs):
         return run_cmd(f'oc new-project {project_name}')
 
 
-def delete_namespace(**kwargs):
-    '''
-    Deletes a project
-    '''
+def delete_namespace(project_name):
+    """
+    Deletes the project
+    Args:
+        project_name (str): Project to be deleted
 
-    project_name = kwargs['project_name']
-    return run_cmd(f'oc delete project {project_name}')
+    Returns:
+        (bool): True if deletion is successful, False otherwise
+
+    """
+
+    return NAMESPACE.delete(resource_name=project_name)
 
 
 def create_storageclass(**kwargs):
-    '''
-    Create a storage class
-    '''
+    """
+    Creates a storage class
+    Args:
+        **kwargs:
+
+    Returns:
+        (bool): True if creation is successful, False otherwise
+
+    """
 
     sc_name = (kwargs['sc_name'])
     sc_get = SC.get()
-    storage_classes = []
-    for i in range(len(sc_get['items'])):
-        storage_classes.append(sc_get['items'][i]['metadata']['name'])
+    storage_classes = [item['metadata']['name'] for item in sc_get['items']]
     log.info(f'checking if {sc_name} exists already')
     if sc_name in storage_classes:
         log.info(f'storage class {sc_name} exists, using {sc_name} ')
@@ -118,26 +164,36 @@ def create_storageclass(**kwargs):
         file_sc = templating.generate_yaml_from_jinja2_template_with_data(
             SC_YAML, **kwargs
         )
-
         with open(TEMP_SC_YAML_FILE, 'w') as yaml_file:
             yaml.dump(file_sc, yaml_file, default_flow_style=False)
         return SC.create(yaml_file=TEMP_SC_YAML_FILE)
 
 
-def delete_storageclass(**kwargs):
-    '''
-    Deletes a storageclass
-    '''
+def delete_storageclass(sc_name):
+    """
+    Deletes a storage class
+    Args:
+        sc_name(str): Storage class to be deleted
 
-    sc_name = kwargs['sc_name']
+    Returns:
+        (bool): True if deletion is successful, False otherwise
+
+    """
+
     log.info(f'deleting storage class: {sc_name}')
-    return run_cmd(f'oc delete sc {sc_name}')
+    return SC.delete(resource_name=sc_name)
 
 
 def create_pvc(**kwargs):
-    '''
-    Creates a PersistentVolumeClaim
-    '''
+    """
+    Creates a Persistent Volume Claim
+    Args:
+        **kwargs:
+
+    Returns:
+        (bool): True if creation is successful, False otherwise
+
+    """
 
     file_pvc = templating.generate_yaml_from_jinja2_template_with_data(
         PVC_YAML, **kwargs
@@ -146,30 +202,44 @@ def create_pvc(**kwargs):
         yaml.dump(file_pvc, yaml_file, default_flow_style=False)
         log.info(f"Creating new Persistent Volume Claim")
     assert PVC.create(yaml_file=TEMP_PVC_YAML_FILE)
-    return PVC.wait_for_resource_status(kwargs['pvc_name'], 'Bound')
+    return PVC.wait_for_resource(
+        resource_name=kwargs['pvc_name'], condition='Bound'
+    )
 
 
-def delete_pvc(**kwargs):
-    '''
-    Deletes a PVC and its underlying PV if Reclaim policy
-    is Retain'
-    '''
+def delete_pvc(pvc_name):
+    """
+    Deletes a PVC and its underlying PV.
+     Args:
+        pvc_name: Name of the PVC to be deleted
 
-    pvc_name = kwargs['pvc_name']
+    Returns:
+        (bool): True if deletion is successful, False otherwise
+
+    """
+
     log.info(f"Deleting the Persistent Volume Claim {pvc_name}")
     pvc_get = PVC.get(pvc_name)
     pv_get = PV.get(pvc_get.spec.volumeName)
+    pv_name = pv_get['metadata']['name']
     if pv_get.spec.persistentVolumeReclaimPolicy == 'Retain':
-        assert run_cmd(f'oc delete pvc {pvc_name}')
-        return run_cmd(f'oc delete pv {pvc_get.spec.volumeName}')
+        assert PVC.delete(resource_name=pvc_name), "Deletion of PVC failed"
+        assert PV.delete(resource_name=pv_name), "Deletion of PV failed"
+        return True
     elif pv_get.spec.persistentVolumeReclaimPolicy == 'Delete':
-        return run_cmd(f'oc delete pvc {pvc_name}')
+        return PVC.delete(resource_name=pvc_name), "Deletion of PVC failed"
 
 
 def create_app_pod(**kwargs):
-    '''
-    creates an nginx pod.
-    '''
+    """
+    Creates an nginx app pod with PVC attached
+    Args:
+        **kwargs:
+
+    Returns:
+        (bool): True if creation is successful, False otherwise
+
+    """
 
     file_pod = templating.generate_yaml_from_jinja2_template_with_data(
         POD_YAML, **kwargs
@@ -178,63 +248,85 @@ def create_app_pod(**kwargs):
         yaml.dump(file_pod, yaml_file, default_flow_style=False)
         log.info(f"Creating app pod")
         assert POD.create(yaml_file=TEMP_POD_YAML_FILE)
-        # TODO - Add a wait using wait() function
-        #  to check if pod is running
-        time.sleep(90)
-        return True
+        return POD.wait_for_resource(
+            resource_name=kwargs['pod_name'], condition='Running',
+            timeout=180, sleep=10
+        )
 
 
-def write_to_app_pod(**kwargs):
+def delete_app_pod(pod_name):
     """
-    function to write a file on to the rbd volume.
+    Delete the app pod
+    Args:
+        pod_name (string): Name of the pod to be deleted
+
+    Returns:
+        (bool): True if deletion is successful, False otherwise
+
     """
 
-    project_name = kwargs['project_name']
-    pod_name = kwargs['pod_name']
-    size_to_write = kwargs['size_to_write']
-    command = f"oc rsh -n {project_name} {pod_name} fallocate" \
-        f" -l {size_to_write} /var/lib/www/html/test"
-    return run_cmd(command)
-
-
-def delete_app_pod(**kwargs):
-    '''
-    Delete the app pod created
-    '''
-    pod_name = kwargs['pod_name']
-    project_name = kwargs['project_name']
     log.info(f"deleting pod {pod_name}")
-    assert run_cmd(f'oc delete -n {project_name} pod {pod_name}')
+    # assert run_cmd(f'oc delete -n {project_name} pod {pod_name}')
+    assert POD.delete(resource_name=pod_name), \
+        "Deletion of pod {pod_name} successful"
     return True
 
 
-def run(**kwargs):
-    '''
-    Function that actually runs the test
-    '''
+def check_volsize_app_pod(**kwargs):
+    """
+    function to write a file on to the rbd volume.
+    Args:
+        **kwargs: Project name and app pod name
+
+    Returns:
+        (bool): True if the PVC size and the volume size
+        in app pod is same, False otherwise
+
+
+    """
+
+    project_name = kwargs['project_name']
+    app_pod = kwargs['pod_name']
+
+    command = f'oc rsh -n {project_name} {app_pod} ' \
+        f'df --output=size -h /var/lib/www/html'
+    size = run_cmd(command)
+    size = int(size.split('\n')[-2][:-1])
+    if size == kwargs['pvc_size']:
+        return True
+    else:
+        return False
+
+
+@tier1
+@pytest.mark.usefixtures(
+    test_fixture.__name__,
+)
+class TestAllocateSizeMorethanClusterSize(ManageTest):
 
     data = {}
-    pvc_name = 'my-pvc1'
-    data['pvc_name'] = pvc_name
-    data['project_name'] = 'ocs-qe'
+    data['pvc_name'] = 'my-pvc1'
+    data['project_name'] = defaults.TEST_NAMESPACE
     data['sc_name'] = 'ocs-qe-sc'
     data['pod_name'] = 'nginxpod'
+    ceph_tool = ocp.get_ceph_tools_pod()
+    data['pvc_size'] = ceph_storage_capacity() + 100
 
-    ceph_tool = find_cephtool()
-    assert create_namespace(**data)
-    assert create_storageclass(**data)
+    @tier1
+    def test_allocate_more_size_rbd(self, request):
+        """
 
-    cluster_size = int(ceph_storage_capacity(ceph_tool))
-    data['storage_capacity'] = str((cluster_size) + 100) + 'Gi'
-    data['size_to_write'] = str((cluster_size) + 10) + 'G'
-    assert create_pvc(**data)
-    assert create_app_pod(**data)
-    assert not write_to_app_pod(**data)
-    assert delete_app_pod(**data)
-    assert delete_pvc(**data)
-    assert delete_storageclass(**data)
-    assert delete_namespace(**data)
-    utils.delete_file(TEMP_POD_YAML_FILE)
-    utils.delete_file(TEMP_PVC_YAML_FILE)
-    utils.delete_file(TEMP_SC_YAML_FILE)
-    return StatusOfTest.PASSED
+        Test to validate OCS-269 for RBD volume
+
+        """
+
+        assert create_pvc(**self.data)
+        assert create_app_pod(**self.data)
+        assert check_volsize_app_pod(**self.data), "Size doesn't match"
+        log.info("PVC size & volume size in app pod match")
+        assert delete_app_pod(self.data['pod_name'])
+        log.info(f"Deleted app pod created for Test: {request.node.name}")
+        assert delete_pvc(self.data['pvc_name'])
+        log.info(f"Deleted pvc created for test: {request.node.name}")
+
+    # Todo: Test for CephFS to be implemented.
