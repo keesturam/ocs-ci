@@ -220,7 +220,7 @@ def create_storage_class(
     return create_resource(**sc_data, wait=False)
 
 
-def create_pvc(sc_name, pvc_name=None):
+def create_pvc(sc_name, pvc_name=None, pvc_size='1'):
     """
     Create a PVC
 
@@ -228,6 +228,7 @@ def create_pvc(sc_name, pvc_name=None):
         sc_name (str): The name of the storage class for the PVC to be
             associated with
         pvc_name (str): The name of the PVC to create
+        pvc_size (str): size of PVC to be created, defaults to '1'
 
     Returns:
         OCS: An OCS instance for the PVC
@@ -240,6 +241,8 @@ def create_pvc(sc_name, pvc_name=None):
     )
     pvc_data['metadata']['namespace'] = defaults.ROOK_CLUSTER_NAMESPACE
     pvc_data['spec']['storageClassName'] = sc_name
+    pvc_size = pvc_size + 'Gi'
+    pvc_data['spec']['resources']['requests']['storage'] = pvc_size
     return create_resource(
         desired_status=constants.STATUS_BOUND, **pvc_data
     )
