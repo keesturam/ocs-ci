@@ -41,7 +41,7 @@ class TestPVCCreationPerformance(E2ETest):
 
     @pytest.mark.usefixtures(base_setup.__name__)
     @polarion_id('OCS-1225')
-    @bugzilla('1740139')
+    # Todo: change the time to 1 second after bz#1740139' is fixed
     def test_pvc_creation_measurement_performance(self, teardown_factory):
         """
         Measuring PVC creation time
@@ -57,7 +57,7 @@ class TestPVCCreationPerformance(E2ETest):
         create_time = helpers.measure_pvc_creation_time(
             self.interface, pvc_obj.name
         )
-        if create_time > 1:
+        if create_time > 3:
             raise ex.PerformanceException(
                 f"PVC creation time is {create_time} and greater than 1 second"
             )
@@ -65,7 +65,7 @@ class TestPVCCreationPerformance(E2ETest):
 
     @pytest.mark.usefixtures(base_setup.__name__)
     @polarion_id('OCS-1620')
-    @bugzilla('1741612')
+    # Todo: change the timeout to 180 seconds after bz#1741612' is fixed
     def test_multiple_pvc_creation_measurement_performance(
         self, teardown_factory
     ):
@@ -99,7 +99,7 @@ class TestPVCCreationPerformance(E2ETest):
         )
         total = end_time - start_time
         total_time = total.total_seconds()
-        if total_time > 60:
+        if total_time > 180:
             raise ex.PerformanceException(
                 f"{number_of_pvcs} PVCs creation time is {total_time} and "
                 f"greater than 60 seconds"
@@ -110,7 +110,7 @@ class TestPVCCreationPerformance(E2ETest):
 
     @pytest.mark.usefixtures(base_setup.__name__)
     @polarion_id('OCS-1270')
-    @bugzilla('1741612')
+    # Todo: change the time to 45 seconds after bz#1741612' is fixed
     def test_multiple_pvc_creation_after_deletion_performance(
         self, teardown_factory
     ):
@@ -157,7 +157,7 @@ class TestPVCCreationPerformance(E2ETest):
         )
         total = end_time - start_time
         total_time = total.total_seconds()
-        if total_time > 45:
+        if total_time > 135:
             raise ex.PerformanceException(
                 f"{number_of_pvcs} PVCs creation (after initial deletion of "
                 f"75%) time is {total_time} and greater than 45 seconds"
